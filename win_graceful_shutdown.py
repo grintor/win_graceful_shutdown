@@ -127,7 +127,23 @@ def ConsoleCtrlHandler(sig):
         if not EXIT_HANDLERS_RUNNING:
             atexit.register(first_exit)
             EXIT_REASON = win32con.CTRL_CLOSE_EVENT
-            sys.exit(RETURN_CTRL_CLOSE_EVENT) # sys.exit() is required here so the exit handlers can run for a CTRL_CLOSE_EVENT
+
+            # we are already past the point where the exit handlers would normally be able to run,
+            # so we have to use our monkey-patched atexit module to run each exit handler manually
+            # note that this cannot take longer than 5 seconds or the OS kills the process
+            for registered_function in reversed(atexit.registered_functions):
+                func = registered_function['func']
+                args = registered_function['args']
+                kwargs = registered_function['kwargs']
+                if args and kwargs:
+                    func(*args, **kwargs)
+                if args and not kwargs:
+                    func(*args)
+                if kwargs and not args:
+                    func(*kwargs)
+                if not kwargs and not args:
+                    func()
+            os._exit(RETURN_CTRL_CLOSE_EVENT)
         else:
             while True: # same logic as WM_ENDSESSION, need to wait for the exit handlers to finish
                 time.sleep(1)
@@ -140,10 +156,28 @@ def ConsoleCtrlHandler(sig):
         pass
 
 def init():
+    patch_atexit() # we monkey-patch atexit so that we can manually run the exit handlers later if we have to
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGBREAK, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     win32api.SetConsoleCtrlHandler(ConsoleCtrlHandler, True)
     threading.Thread(target=window_thread, daemon=True).start()
+
+def patch_atexit():
+    atexit.origional_register = atexit.register
+    atexit.origional_unregister = atexit.unregister
+    atexit.registered_functions = []
+
+    def atexit_register_new(func, *args, **kwargs):
+        atexit.origional_register(func, *args, **kwargs)
+        atexit.registered_functions.append({'args': args, 'kwargs': kwargs, 'func': func})
+
+    def atexit_unregister_new(func):
+        atexit.origional_unregister(func)
+        # remove all items from the registered_functions list in which the func is the same
+        atexit.registered_functions[:] = [item for item in atexit.registered_functions if item['func'] != func]
+
+    atexit.register = atexit_register_new
+    atexit.unregister = atexit_unregister_new
 
 init()
